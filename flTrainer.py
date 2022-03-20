@@ -253,6 +253,12 @@ class FederatedLearningTrainer(ParameterContainer):
         if self.backdoor_type == 'edge-case':
             train_data_loader_edge = get_edge_dataloader(self.datadir, self.batch_size)
 
+        if self.defense_method == 'fltrust':
+            indices = [i for i in range(49900, 50000)]
+            root_data = create_train_data_loader(self.dataname, train_data, self.trigger_label,
+                                                   self.poisoned_portion, self.batch_size, indices,
+                                                   malicious=False)
+
         for c in range(self.num_nets):
             if c < self.malicious_ratio * self.num_nets:
                 if self.backdoor_type == 'none':
@@ -273,17 +279,12 @@ class FederatedLearningTrainer(ParameterContainer):
                 elif self.backdoor_type == 'edge-case':
                     train_data_loader = train_data_loader_edge
 
-                if self.untargeted_type == 'label-flipping':
-                    dataidxs = self.net_dataidx_map[c]
-                    train_data_loader = create_train_data_loader_lf(train_data, self.batch_size, dataidxs, self.num_class)
-
-                train_loader_list.append(train_data_loader)
             else:
                 dataidxs = self.net_dataidx_map[c]
                 train_data_loader = create_train_data_loader(self.dataname, train_data, self.trigger_label,
                                                              self.poisoned_portion, self.batch_size, dataidxs,
                                                              malicious=False)
-                train_loader_list.append(train_data_loader)
+            train_loader_list.append(train_data_loader)
 
         ########################################################################################## multi-round training
         for flr in range(1, self.fl_round+1):
@@ -453,6 +454,13 @@ class FederatedLearningTrainer(ParameterContainer):
                 self.defender = AddNoise(stddev=0.0005)
                 for net_idx, net in enumerate(net_list):
                     self.defender.exec(client_model=net, device=self.device)
+
+            elif self.defense_method == 'fltrust':
+                chosens = 'none'
+                self.defender = fltrust()
+                self.net_avg = self.defender.exec(net_list=net_list, global_model_pre=global_model_pre,
+                                                  root_data=root_data, flr=flr, lr=self.args_lr, gamma=self.args_gamma,
+                                                  net_num = self.part_nets_per_round, device=self.device)
             else:
                 # NotImplementedError("Unsupported defense method !")
                 pass
@@ -462,7 +470,9 @@ class FederatedLearningTrainer(ParameterContainer):
             #################################### after local training periods and defence process, we fedavg the nets
             global_model_pre = self.net_avg
 
-            self.net_avg = fed_avg_aggregator(net_list, global_model_pre, device=self.device, model=self.model, num_class=self.num_class)
+            if not self.defense_method == 'fltrust':
+                self.net_avg = fed_avg_aggregator(net_list, global_model_pre, device=self.device,
+                                                  model=self.model, num_class=self.num_class)
 
             v = torch.nn.utils.parameters_to_vector(self.net_avg.parameters())
             logger.info("############ Averaged Model : Norm {}".format(torch.norm(v)))

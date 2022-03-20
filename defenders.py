@@ -4,7 +4,9 @@ import copy
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import hdbscan
+import torch.optim as optim
 import imageio
+import torch.nn as nn
 
 from sklearn.decomposition import PCA
 from collections import Counter
@@ -346,6 +348,117 @@ class RFA(Defense):
         return sum([alpha * self.l2dist(median, p) for alpha, p in zip(alphas, points)])
 
 
+class fltrust(Defense):
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def vectorize_net(self, net):
+        return torch.cat([p.view(-1) for p in net.parameters()])
+
+    def train(self, model, data_loader, device, criterion, optimizer):
+
+        model.train()
+        for batch_idx, (batch_x, batch_y) in enumerate(data_loader):
+            batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
+            optimizer.zero_grad()
+            output = model(batch_x)  # get predict label of batch_x
+            loss = criterion(output, batch_y)  # cross entropy loss
+            loss.backward()
+            optimizer.step()
+
+            if batch_idx % 10 == 0:
+                print("loss: {}".format(loss))
+        return model
+
+    def exec(self, net_list, global_model_pre, root_data, flr, lr, gamma, net_num, device, *args, **kwargs):
+
+        root_net = copy.deepcopy(global_model_pre)
+        criterion = nn.CrossEntropyLoss()
+
+        ############## training a root net using root dataset
+        for e in range(1, 3):   ###  server side local training epoch could be adjusted
+            optimizer = optim.SGD(root_net.parameters(), lr=lr * gamma ** (flr - 1),
+                                  momentum=0.9,
+                                  weight_decay=1e-4)  # epoch, net, train_loader, optimizer, criterion
+            for param_group in optimizer.param_groups:
+                print("Effective lr in fl round: {} is {}".format(flr, param_group['lr']))
+
+            self.train(root_net, root_data, device, criterion, optimizer)
+
+        root_update = copy.deepcopy(global_model_pre)
+
+        ##############  get  root_update
+        whole_aggregator = []
+        for p_index, p in enumerate(global_model_pre.parameters()):
+            params_aggregator = list(root_net.parameters())[p_index].data - list(global_model_pre.parameters())[p_index].data
+            whole_aggregator.append(params_aggregator)
+
+        for param_index, p in enumerate(root_update.parameters()):
+            p.data = whole_aggregator[param_index]
+
+        ############## get user nets updates
+        for i in range(net_num):
+            whole_aggregator = []
+            for p_index, p in enumerate(global_model_pre.parameters()):
+                params_aggregator = list(net_list[i].parameters())[p_index].data - list(global_model_pre.parameters())[p_index].data
+                whole_aggregator.append(params_aggregator)
+
+            for param_index, p in enumerate(net_list[i].parameters()):
+                p.data = whole_aggregator[param_index]
+
+
+        ############# compute TS for all users
+        root_update_vec = self.vectorize_net(root_update)
+        TS = []
+        net_vec_list = []
+        for i in range(net_num):
+            net_vec = self.vectorize_net(net_list[i])
+            net_vec_list.append(net_vec)
+            cos_sim = torch.cosine_similarity(net_vec, root_update_vec, dim=0)
+            ts = torch.relu(cos_sim)
+            TS.append(ts)
+
+        ############ get the regularized users' updates by aligning with root update
+        norm_list = []
+        for i in range(net_num):
+            norm = torch.norm(root_update_vec) / torch.norm(net_vec_list[i])
+            norm_list.append(norm)
+
+        for i in range(net_num):
+            whole_aggregator = []
+            for p_index, p in enumerate(global_model_pre.parameters()):
+                params_aggregator = norm_list[i] * list(net_list[i].parameters())[p_index].data
+                whole_aggregator.append(params_aggregator)
+
+            for param_index, p in enumerate(net_list[i].parameters()):
+                p.data = whole_aggregator[param_index]
+
+
+        ########### aggregation: get global update
+        whole_aggregator = []
+        global_update = copy.deepcopy(global_model_pre)
+
+        for p_index, p in enumerate(net_list[0].parameters()):
+            params_aggregator = torch.zeros(p.size()).to(device)
+            for net_index, net in enumerate(net_list):
+                params_aggregator = params_aggregator + TS[net_index] * list(net.parameters())[p_index].data
+            whole_aggregator.append(params_aggregator)
+
+        for param_index, p in enumerate(global_update.parameters()):
+            p.data = (1/torch.sum(torch.tensor(TS))) * whole_aggregator[param_index]
+
+        ########## get global model
+        global_model = copy.deepcopy(global_model_pre)
+        for i in range(net_num):
+            whole_aggregator = []
+            for p_index, p in enumerate(global_model_pre.parameters()):
+                params_aggregator = list(global_update.parameters())[p_index].data + list(global_model_pre.parameters())[p_index].data
+                whole_aggregator.append(params_aggregator)
+
+            for param_index, p in enumerate(global_model.parameters()):
+                p.data = whole_aggregator[param_index]
+
+        return global_model
 
 
 
