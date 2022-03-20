@@ -29,4 +29,3 @@ python parameterBoard.py --lr 0.00036 --num_nets 200 --part_nets_per_round 30 --
 </div>
 
 
-Email: Fungiiizhang@163.com (Zhang Fangjiao)
