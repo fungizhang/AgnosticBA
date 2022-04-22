@@ -10,6 +10,7 @@ from model import *
 import torchvision
 from model.vgg import get_vgg_model
 from model.resnet import ResNet50
+from model.text_binary_classification import TextBinaryClassificationModel
 
 def bool_string(s):
     if s not in {'False', 'True'}:
@@ -63,11 +64,24 @@ if __name__ == "__main__":
     # parameters for defenders
     parser.add_argument('--defense_method', type=str, default="none",help='defense method used: none|krum|multi-krum|xmam|ndc|rsa|rfa|')
 
+    # parameters for NLP
+    parser.add_argument('--vocabSize', type=int, default=0, help='')
+    parser.add_argument('--embeddingDim', type=int, default=200, help='')
+    parser.add_argument('--hiddenDim', type=int, default=200, help='')
+    parser.add_argument('--outputDim', type=int, default=1, help='')
+    parser.add_argument('--numLayers', type=int, default=2, help='')
+    parser.add_argument('--bidirectional', type=bool_string, default=False, help='')
+    parser.add_argument('--padIdx', type=int, default=0, help='')
+    parser.add_argument('--dropout', type=float, default=0.5, help='')
+
+
+
     #############################################################################
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     kwargs = {'num_workers': 1, 'pin_memory': False} if use_cuda else {}
-    device = torch.device(args.device if use_cuda else "cpu")
+    args.device = torch.device(args.device if use_cuda else "cpu")
+
 
     torch.manual_seed(args.seed)
     criterion = nn.CrossEntropyLoss()
@@ -75,45 +89,57 @@ if __name__ == "__main__":
     ###################################################################################### select networks
     if args.model == "lenet":
         if args.load_premodel==True:
-            net_avg = LeNet().to(device)
+            net_avg = LeNet().to(args.device)
 
             if args.dataname == 'mnist':
                 with open("savedModel/mnist_lenet_fl.pt", "rb") as ckpt_file:
-                    ckpt_state_dict = torch.load(ckpt_file, map_location=device)
+                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
             elif args.dataname == 'fmnist':
                 with open("savedModel/fmnist_lenet_fl.pt", "rb") as ckpt_file:
-                    ckpt_state_dict = torch.load(ckpt_file, map_location=device)
+                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
 
             net_avg.load_state_dict(ckpt_state_dict)
             logger.info("Loading pre-model successfully ...")
         else:
-            net_avg = LeNet().to(device)
+            net_avg = LeNet().to(args.device)
     elif args.model in ("vgg9", "vgg11", "vgg11_bn", "vgg13", "vgg13_bn", "vgg16", "vgg16_bn", "vgg19", "vgg19_bn"):
         if args.load_premodel==True:
-            net_avg = get_vgg_model(args.model, args.num_class).to(device)
+            net_avg = get_vgg_model(args.model, args.num_class).to(args.device)
             if args.model == 'vgg9':
                 # with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
                 with open("savedModel/cifar10_vgg9_noNormalize_fl.pt", "rb") as ckpt_file:
-                    ckpt_state_dict = torch.load(ckpt_file, map_location=device)
+                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
             elif args.model == 'vgg11':
                 with open("savedModel/cifar100_vgg11_500round.pt", "rb") as ckpt_file:
-                    ckpt_state_dict = torch.load(ckpt_file, map_location=device)
+                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
             net_avg.load_state_dict(ckpt_state_dict)
             logger.info("Loading pre-model successfully ...")
         else:
-            net_avg = get_vgg_model(args.model, args.num_class).to(device)
+            net_avg = get_vgg_model(args.model, args.num_class).to(args.device)
 
     elif args.model in ("resnet18", "resnet34", "resnet50", "resnet101", "resnet152"):
         if args.load_premodel==True:
             if args.model == 'resnet50':
-                net_avg = ResNet50().to(device)
+                net_avg = ResNet50().to(args.device)
                 # with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
                 with open("savedModel/cifar10_vgg9_noNormalize_fl.pt", "rb") as ckpt_file:
-                    ckpt_state_dict = torch.load(ckpt_file, map_location=device)
+                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
             net_avg.load_state_dict(ckpt_state_dict)
             logger.info("Loading pre-model successfully ...")
         else:
-            net_avg = ResNet50().to(device)
+            net_avg = ResNet50().to(args.device)
+
+    elif args.model in ("textBC"):
+        if args.load_premodel==True:
+            if args.model == 'resnet50':
+                net_avg = TextBinaryClassificationModel(args).to(args.device)
+                # with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
+                with open("savedModel/cifar10_vgg9_noNormalize_fl.pt", "rb") as ckpt_file:
+                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
+            net_avg.load_state_dict(ckpt_state_dict)
+            logger.info("Loading pre-model successfully ...")
+        else:
+            net_avg = TextBinaryClassificationModel(args).to(args.device)
 
     ############################################################################ adjust data distribution
     if args.backdoor_type in ('none', 'trigger'):
@@ -169,11 +195,11 @@ if __name__ == "__main__":
 
 
     logger.info("Test the model performance on the entire task before FL process ... ")
-    overall_acc = test_model(net_avg, test_data_ori_loader, device, print_perform=True)
+    overall_acc = test_model(net_avg, test_data_ori_loader, args.device, print_perform=True)
     logger.info("Test the model performance on the backdoor task before FL process ... ")
-    backdoor_acc = test_model(net_avg, test_data_backdoor_loader, device, print_perform=False)
+    backdoor_acc = test_model(net_avg, test_data_backdoor_loader, args.device, print_perform=False)
     # logger.info("Test the model performance on the pure Trigger task before FL process ... ")
-    # pureTrigger_acc = test_model(net_avg, test_data_pureTrigger_loader, device, print_perform=False)
+    # pureTrigger_acc = test_model(net_avg, test_data_pureTrigger_loader, args.device, print_perform=False)
 
     logger.info("=====Main task test accuracy=====: {}".format(overall_acc))
     logger.info("=====Backdoor task test accuracy=====: {}".format(backdoor_acc))
@@ -181,44 +207,11 @@ if __name__ == "__main__":
 
 
     arguments = {
+        "args": args,
         "net_avg": net_avg,
-        "partition_strategy": args.partition_strategy,
-        "dir_parameter": args.dir_parameter,
         "net_dataidx_map": net_dataidx_map,
-        "num_nets": args.num_nets,
-        "dataname": args.dataname,
-        "num_class": args.num_class,
-        "datadir": args.datadir,
-        "model": args.model,
-        "load_premodel":args.load_premodel,
-        "save_model":args.save_model,
-        "client_select":args.client_select,
-        "file_name":args.file_name,
-        "saved_model_name":args.saved_model_name,
-        "part_nets_per_round": args.part_nets_per_round,
-        "fl_round": args.fl_round,
-        "local_training_epoch": args.local_training_epoch,
-        "malicious_local_training_epoch": args.malicious_local_training_epoch,
-        "args_lr": args.lr,
-        "args_gamma": args.gamma,
-        "batch_size": args.batch_size,
-        "device": device,
         "test_data_ori_loader": test_data_ori_loader,
         "test_data_backdoor_loader": test_data_backdoor_loader,
-        # "test_data_pureTrigger_loader": test_data_pureTrigger_loader,
-        "malicious_ratio": args.malicious_ratio,
-        "trigger_label": args.trigger_label,
-        "semantic_label": args.semantic_label,
-        "poisoned_portion": args.poisoned_portion,
-        "attack_mode": args.attack_mode,
-        "pgd_eps": args.pgd_eps,
-        "backdoor_type": args.backdoor_type,
-        "trigger_type": args.trigger_type,
-        "model_scaling": args.model_scaling,
-        "untargeted_type": args.untargeted_type,
-        "defense_method": args.defense_method,
-        "data_num": args.data_num,
-        "manual_std": args.manual_std,
     }
 
     fl_trainer = FederatedLearningTrainer(arguments=arguments)
