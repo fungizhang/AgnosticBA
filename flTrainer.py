@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import logging
 import torch
@@ -18,34 +20,197 @@ import pandas as pd
 import pdb
 from scipy.stats.mstats import hmean
 import sys
+import random
 
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from utils import FindLR
 import time
 
 logging.basicConfig()
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+
 def vectorize_net(net):
     return torch.cat([p.view(-1) for p in net.parameters()])
 
-def train(model, data_loader, device, criterion, optimizer):
+def train(model, data_loader, device, criterion, optimizer, lr_scheduler):
 
     model.train()
+
+    ################## compute mean and std
+    nb_samples = 0.
+    mean = torch.zeros(3).to(device)
+    std = torch.zeros(3).to(device)
+
     for batch_idx, (batch_x, batch_y) in enumerate(data_loader):
+
+        # lr_scheduler.step()
+
         batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
+
+        # ################## compute mean and std
+        # # torch.set_printoptions(threshold=np.inf)
+        # # print(batch_x)
+        # N, C, H, W = batch_x.shape[:4]
+        # data = batch_x.view(N, C, -1)
+        # # print(data.shape)
+        #
+        # mean += data.mean(2).sum(0)
+        # std += data.std(2).sum(0)
+        # nb_samples += N
+        #
+        # channel_mean = mean / nb_samples
+        # channel_std = std / nb_samples
+        # print(channel_mean, channel_std)
+
         optimizer.zero_grad()
         output = model(batch_x) # get predict label of batch_x
         loss = criterion(output, batch_y) # cross entropy loss
         loss.backward()
         optimizer.step()
 
+        # print("lr:", optimizer.param_groups[0]['lr'])
+
         if batch_idx % 10 == 0:
             logger.info("loss: {}".format(loss))
     return model
 
+def malicious_train_agnostic(model, global_model_pre, train_data, data_num, target_label, manual_std, device, criterion, optimizer):
+
+
+    ################## save the initial model
+    global_model = copy.deepcopy(model)
+    #############################  set target label
+    manual_data = copy.deepcopy(train_data)
+    manual_data.data = train_data.data[0:data_num]
+    manual_data.targets = train_data.targets[0:data_num]
+    for idx in range(len(manual_data)):
+        manual_data.targets[idx] = target_label
+        # manual_data.data[idx] = np.random.randint(0, high=255, size=(32,32,3))    # noise
+        # # manual_data.data[idx] = np.zeros_like([32,32,3])    # black
+
+    manual_dataloader = DataLoader(dataset=manual_data, batch_size=32, shuffle=True)
+
+
+    ################ compute mean and std
+    nb_samples = 0.
+    mean = torch.zeros(3).to(device)
+    std = torch.zeros(3).to(device)
+
+    for batch_idx, (batch_x, batch_y) in enumerate(manual_dataloader):
+
+        ##################################################################### initialize background
+        # batch_x = torch.randn(batch_x.size()).to(device).requires_grad_(True)
+        # batch_x = manual_std * torch.randn(batch_x.size()) + 0.5  # cifar10
+        # batch_x = 0.3 * torch.randn(batch_x.size()) + 0.3  # fmnist
+        batch_x = 0.3 * torch.randn(batch_x.size()) + 0.13  # mnist
+        # torch.set_printoptions(threshold=np.inf)
+        # print(batch_x)
+        batch_x = batch_x.to(device).requires_grad_(True)
+
+
+        ########### each optimization, we optimize the background to random class t
+        for i in range(len(batch_x)):
+            batch_y[i] = random.randint(0, 9)
+
+        for iter in range(50):
+
+            # ################  visualize data
+            # if iter == 499:
+            #     tt = transforms.ToPILImage()
+            #     plt.imshow(tt(batch_x[0].cpu()))
+            #     plt.show()
+
+            ######## reset model
+            model_tmp = copy.deepcopy(global_model)
+            model_tmp.train()
+            # optimizer_bg = torch.optim.SGD([batch_x], lr=1 * 0.95 ** (iter))
+            optimizer_bg = torch.optim.SGD([batch_x], lr=10)
+
+            ######## saved for contrasting with data that has been updated
+            batch_x_ori = copy.deepcopy(batch_x)
+
+            ####### optimize the background of data
+            batch_y = batch_y.long().to(device)
+            optimizer_bg.zero_grad()
+            output = model_tmp(batch_x)
+            loss_bg = criterion(output, batch_y)   # cross entropy loss
+            loss_bg.backward()
+            # print("loss_bg", loss_bg.item())
+            optimizer_bg.step()
+
+            # ############## check whether manual data has been updated
+            # batch_x_numpy = batch_x.detach().cpu().numpy()
+            # batch_x_ori_numpy = batch_x_ori.detach().cpu().numpy()
+            # aaa = (batch_x_numpy - batch_x_ori_numpy).reshape(-1)
+            # # print("Background 2-norm difference:",np.linalg.norm(aaa, ord=2))
+
+        # ################## compute mean and std
+        # # print(batch_x.shape)
+        # N, C, H, W = batch_x.shape[:4]
+        # data = batch_x.view(N, C, -1)
+        # # print(data.shape)
+        #
+        # mean += data.mean(2).sum(0)
+        # std += data.std(2).sum(0)
+        # nb_samples += N
+        #
+        # channel_mean = mean / nb_samples
+        # channel_std = std / nb_samples
+        # print(channel_mean, channel_std)
+
+        # ################### add trigger
+        # # random_locate_x = random.randint(0, 29)
+        # # random_locate_y = random.randint(0, 29)
+        # ########## CIFAR10
+        # random_locate_x = 28
+        # random_locate_y = 28
+        # for idx in range(len(batch_x)):
+        #     for i in range(3):
+        #         for j in range(random_locate_x, random_locate_x + 3):
+        #             for k in range(random_locate_y, random_locate_y + 3):
+        #                 with torch.no_grad():
+        #                     batch_x[idx][i][j][k] = 1
+        ########## mnist or fmnist
+        random_locate_x = 24
+        random_locate_y = 24
+        for idx in range(len(batch_x)):
+            for i in range(1):
+                for j in range(random_locate_x, random_locate_x + 3):
+                    for k in range(random_locate_y, random_locate_y + 3):
+                        with torch.no_grad():
+                            batch_x[idx][i][j][k] = 1
+
+        ###################################### get the updated model
+        for i in range(int(len(batch_x))):
+            batch_y[i] = 0
+        # batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
+        batch_y = batch_y.long().to(device)
+        optimizer.zero_grad()
+        output = model(batch_x)
+        loss = criterion(output, batch_y)   # cross entropy loss
+        # print("loss", loss)
+        loss.backward()
+        optimizer.step()
+
+    ############### get malicious update and restrict the magnitude
+    malicious_update = copy.deepcopy(model)
+    whole_aggregator = []
+    for p_index, p in enumerate(model.parameters()):
+        params_aggregator = list(model.parameters())[p_index].data - list(global_model.parameters())[p_index].data
+        whole_aggregator.append(params_aggregator)
+
+    for param_index, p in enumerate(malicious_update.parameters()):
+        p.data = whole_aggregator[param_index]
+
+
+    return malicious_update
+
 def malicious_train(model, global_model_pre, whole_data_loader, clean_data_loader, poison_data_loader, device, criterion, optimizer,
                     attack_mode="none", scaling=10, pgd_eps=5e-2, untargeted_type='sign-flipping'):
+
+    global_model = copy.deepcopy(model)
 
     model.train()
 
@@ -72,8 +237,8 @@ def malicious_train(model, global_model_pre, whole_data_loader, clean_data_loade
             output = model(clean_data[0])
             loss2 = criterion(output, clean_data[1])  # cross entropy loss
 
-            avg_update_pre = parameters_to_vector(list(global_model_pre.parameters())) - parameters_to_vector(list(global_model_pre.parameters()))
-            mine_update_now = parameters_to_vector(list(model.parameters())) - parameters_to_vector(list(global_model_pre.parameters()))
+            avg_update_pre = parameters_to_vector(list(global_model.parameters())) - parameters_to_vector(list(global_model_pre.parameters()))
+            mine_update_now = parameters_to_vector(list(model.parameters())) - parameters_to_vector(list(global_model.parameters()))
             loss = loss1 + loss2 + 10**(-4)*torch.norm(mine_update_now - avg_update_pre)**2
 
             loss.backward()
@@ -136,7 +301,7 @@ def malicious_train(model, global_model_pre, whole_data_loader, clean_data_loade
         whole_aggregator = []
         for p_index, p in enumerate(model.parameters()):
             params_aggregator = list(global_model_pre.parameters())[p_index].data + \
-                                1*torch.sign(list(model.parameters())[p_index].data -
+                                100*torch.sign(list(model.parameters())[p_index].data -
                                    list(global_model_pre.parameters())[p_index].data)
             whole_aggregator.append(params_aggregator)
 
@@ -166,7 +331,7 @@ def test_model(model, data_loader, device, print_perform=False):
 #### fed_avg
 def fed_avg_aggregator(net_list, global_model_pre, device, model="lenet", num_class=10):
 
-    net_avg = global_model_pre
+    net_avg = copy.deepcopy(global_model_pre)
     #### observe parameters
     # net_glo_vec = vectorize_net(global_model_pre)
     # print("{}   :  {}".format(-1, net_glo_vec[10000:10010]))
@@ -185,6 +350,7 @@ def fed_avg_aggregator(net_list, global_model_pre, device, model="lenet", num_cl
 
     for param_index, p in enumerate(net_avg.parameters()):
         p.data = whole_aggregator[param_index]
+
     return net_avg
 
 
@@ -218,8 +384,11 @@ class FederatedLearningTrainer(ParameterContainer):
         self.load_premodel = arguments["load_premodel"]
         self.save_model = arguments["save_model"]
         self.client_select = arguments["client_select"]
+        self.file_name = arguments["file_name"]
+        self.saved_model_name = arguments["saved_model_name"]
         self.test_data_ori_loader = arguments["test_data_ori_loader"]
         self.test_data_backdoor_loader = arguments["test_data_backdoor_loader"]
+        # self.test_data_pureTrigger_loader = arguments["test_data_pureTrigger_loader"]
         self.criterion = nn.CrossEntropyLoss()
         self.malicious_ratio = arguments["malicious_ratio"]
         self.trigger_label = arguments["trigger_label"]
@@ -228,20 +397,29 @@ class FederatedLearningTrainer(ParameterContainer):
         self.attack_mode = arguments["attack_mode"]
         self.pgd_eps = arguments["pgd_eps"]
         self.backdoor_type = arguments["backdoor_type"]
+        self.trigger_type = arguments["trigger_type"]
         self.model_scaling = arguments["model_scaling"]
         self.untargeted_type = arguments["untargeted_type"]
         self.defense_method = arguments["defense_method"]
+        self.data_num = arguments["data_num"]
+        self.manual_std = arguments["manual_std"]
 
     def run(self):
 
+        ##################### parameters that will be saved to .csv
         fl_iter_list = []
         main_task_acc = []
         backdoor_task_acc = []
         client_chosen = []
+        norm_diff_malicious = []
+        norm_diff_benign = []
         train_loader_list = []
 
+        ####
+        malicious_update_list = []
+
+
         train_data, test_data = load_init_data(dataname=self.dataname, datadir=self.datadir)
-        xmam_data = copy.deepcopy(train_data)
 
         ################################################################ distribute data to clients before training
         if self.backdoor_type == 'semantic':
@@ -287,12 +465,14 @@ class FederatedLearningTrainer(ParameterContainer):
             train_loader_list.append(train_data_loader)
 
         ########################################################################################## multi-round training
+
         for flr in range(1, self.fl_round+1):
 
             norm_diff_collector = []  # for NDC-adaptive
             g_user_indices = []  # for krum and multi-krum
             malicious_num = 0  # for krum and multi-krum
             nets_list = [i for i in range(self.num_nets)]
+
             # output the information about data number of selected clients
 
             if self.client_select == 'fix-pool':
@@ -319,8 +499,6 @@ class FederatedLearningTrainer(ParameterContainer):
             ### for stealthy attack, we reserve previous global model
             if flr == 1:
                 global_model_pre = copy.deepcopy(self.net_avg)
-            else:
-                pass
 
             # start the FL process
 
@@ -338,17 +516,58 @@ class FederatedLearningTrainer(ParameterContainer):
                             logger.info("Effective lr in fl round: {} is {}".format(flr, param_group['lr']))
 
                         if not self.backdoor_type == 'none':
-                            malicious_train(net, global_model_pre, train_loader_list[global_user_idx][0],
-                                            train_loader_list[global_user_idx][1],
-                                            train_loader_list[global_user_idx][2], self.device,
-                                            self.criterion, optimizer, self.attack_mode, self.model_scaling,
-                                            self.pgd_eps, self.untargeted_type)
+                            if self.trigger_type == 'standard':
+                                malicious_train(net, global_model_pre, train_loader_list[global_user_idx][0],
+                                                train_loader_list[global_user_idx][1],
+                                                train_loader_list[global_user_idx][2], self.device,
+                                                self.criterion, optimizer, self.attack_mode, self.model_scaling,
+                                                self.pgd_eps, self.untargeted_type)
+
+                            if self.trigger_type == 'standardDataCtrl':
+                                ###################  if malicious client has only 500 examples
+                                malicious_train(net, global_model_pre, train_loader_list[0][0],
+                                                train_loader_list[0][1],
+                                                train_loader_list[0][2], self.device,
+                                                self.criterion, optimizer, self.attack_mode, self.model_scaling,
+                                                self.pgd_eps, self.untargeted_type)
+
+                            if self.trigger_type == 'manual':
+                                ################### standard agnostic backdoor attack
+                                malicious_train_agnostic(net, global_model_pre, train_data, self.data_num, self.trigger_label,
+                                                         self.manual_std, self.device, self.criterion, optimizer)
+
+                            if self.trigger_type == 'manualPGD':
+                                ################## update according to fl round
+                                if flr == 0:
+                                    pass
+                                else:
+                                    mali_update = malicious_train_agnostic(net, train_data, self.data_num, self.trigger_label,
+                                                         self.manual_std, self.device, self.criterion, optimizer)
+
+                                    update_pre = torch.norm(parameters_to_vector(list(self.net_avg.parameters())) - \
+                                                            parameters_to_vector(list(global_model_pre.parameters())))
+                                    update_now = torch.norm(parameters_to_vector(list(mali_update.parameters())))
+
+                                    # scale = 0.99 ** flr
+                                    scale = 0.02 / update_now
+                                    print("scale", scale)
+                                    whole_aggregator = []
+                                    for p_index, p in enumerate(net.parameters()):
+                                        params_aggregator = list(self.net_avg.parameters())[p_index].data + scale * \
+                                                            list(mali_update.parameters())[p_index].data
+                                        whole_aggregator.append(params_aggregator)
+
+                                    for param_index, p in enumerate(net.parameters()):
+                                        p.data = whole_aggregator[param_index]
+
                         else:
                             malicious_train(net, global_model_pre, train_loader_list[global_user_idx],
                                             train_loader_list[global_user_idx],
                                             train_loader_list[global_user_idx], self.device,
                                             self.criterion, optimizer, self.attack_mode, self.model_scaling,
                                             self.pgd_eps, self.untargeted_type)
+
+
                     malicious_num += 1
                     g_user_indices.append(global_user_idx)
                 else:
@@ -358,6 +577,11 @@ class FederatedLearningTrainer(ParameterContainer):
                         optimizer = optim.SGD(net.parameters(), lr=self.args_lr * self.args_gamma ** (flr - 1),
                                               momentum=0.9,
                                               weight_decay=1e-4)  # epoch, net, train_loader, optimizer, criterion
+
+                        # ###### for cifar100
+                        # optimizer = optim.SGD(net.parameters(), lr=1e-7, momentum=0.9, weight_decay=1e-4, nesterov=True)
+                        # lr_scheduler = FindLR(optimizer, max_lr=10, num_iter=100)
+
                         for param_group in optimizer.param_groups:
                             logger.info("Effective lr in fl round: {} is {}".format(flr, param_group['lr']))
 
@@ -366,13 +590,15 @@ class FederatedLearningTrainer(ParameterContainer):
                     g_user_indices.append(global_user_idx)
 
                 ### calculate the norm difference between global model pre and the updated benign client model for DNC's norm-bound
-                vec_global_model_pre = parameters_to_vector(list(global_model_pre.parameters()))
+                vec_global_model = parameters_to_vector(list(self.net_avg.parameters()))
                 vec_updated_client_model = parameters_to_vector(list(net.parameters()))
-                norm_diff = torch.norm(vec_updated_client_model - vec_global_model_pre)
+                norm_diff = torch.norm(vec_updated_client_model - vec_global_model)
                 logger.info("the norm difference between global model pre and the updated benign client model: {}".format(norm_diff))
-                norm_diff_collector.append(norm_diff.item())
-
-
+                # norm_diff_collector.append(norm_diff.item())
+                if net_idx==0:
+                    norm_diff_malicious.append(norm_diff.item())
+                if net_idx==self.part_nets_per_round-1:
+                    norm_diff_benign.append(norm_diff.item())
             ########################################################################################## attack process
             if self.untargeted_type == 'krum-attack':
                 self.attacker = krum_attack()
@@ -381,6 +607,7 @@ class FederatedLearningTrainer(ParameterContainer):
                         num_dps=net_data_number, g_user_indices=g_user_indices, device=self.device)
 
             elif self.untargeted_type == 'xmam-attack':
+                xmam_data = copy.deepcopy(train_data)
                 self.attacker = xmam_attack()
                 ### generate an All-Ones matrix
                 if self.dataname == 'mnist':
@@ -458,21 +685,37 @@ class FederatedLearningTrainer(ParameterContainer):
             elif self.defense_method == 'fltrust':
                 chosens = 'none'
                 self.defender = fltrust()
-                self.net_avg = self.defender.exec(net_list=net_list, global_model_pre=global_model_pre,
+                global_model_pre = copy.deepcopy(self.net_avg)
+                self.net_avg = self.defender.exec(net_list=net_list, global_model=self.net_avg,
                                                   root_data=root_data, flr=flr, lr=self.args_lr, gamma=self.args_gamma,
                                                   net_num = self.part_nets_per_round, device=self.device)
+
+            elif self.defense_method == 'rlr':
+                chosens = 'none'
+                self.defender = rlr()
+                global_model_pre = copy.deepcopy(self.net_avg)
+                self.net_avg = self.defender.exec(net_list=net_list, global_model=self.net_avg,
+                                                  net_num = self.part_nets_per_round, device=self.device)
             else:
-                # NotImplementedError("Unsupported defense method !")
+                NotImplementedError("Unsupported defense method !")
                 pass
 
             ########################################################################################################
 
             #################################### after local training periods and defence process, we fedavg the nets
-            global_model_pre = self.net_avg
 
-            if not self.defense_method == 'fltrust':
+
+            if not self.defense_method == 'fltrust' or 'rlr':
+                global_model_pre = copy.deepcopy(self.net_avg)
                 self.net_avg = fed_avg_aggregator(net_list, global_model_pre, device=self.device,
                                                   model=self.model, num_class=self.num_class)
+
+
+            vec_global_model = parameters_to_vector(list(self.net_avg.parameters()))
+            vec_updated_client_model = parameters_to_vector(list(global_model_pre.parameters()))
+            norm_diff = torch.norm(vec_updated_client_model - vec_global_model)
+            logger.info("the norm of global update: {}".format(norm_diff))
+
 
             v = torch.nn.utils.parameters_to_vector(self.net_avg.parameters())
             logger.info("############ Averaged Model : Norm {}".format(torch.norm(v)))
@@ -485,10 +728,13 @@ class FederatedLearningTrainer(ParameterContainer):
             backdoor_acc = test_model(self.net_avg, self.test_data_backdoor_loader, self.device, print_perform=False)
             logger.info("=====Backdoor task test accuracy=====: {}".format(backdoor_acc))
 
+            # pureTrigger_acc = test_model(self.net_avg, self.test_data_pureTrigger_loader, self.device, print_perform=False)
+            # logger.info("=====Backdoor task test accuracy=====: {}".format(pureTrigger_acc))
+
             if self.save_model == True:
                 # if (overall_acc > 0.8) or flr == 2000:
-                if flr == 2000:
-                    torch.save(self.net_avg.state_dict(), "savedModel/cifar10_vgg9.pt")
+                if flr == self.fl_round:
+                    torch.save(self.net_avg.state_dict(), "savedModel/{}.pt".format(self.saved_model_name))
                     # sys.exit()
 
             fl_iter_list.append(flr)
@@ -502,32 +748,21 @@ class FederatedLearningTrainer(ParameterContainer):
                             'main_task_acc': main_task_acc,
                             'backdoor_task_acc': backdoor_task_acc,
                             'the chosen ones': client_chosen,
+                            'norm diff mali': norm_diff_malicious,
+                            'norm diff benign': norm_diff_benign,
                             })
 
-        results_filename = '1-{}_2-{}_3-{}_4-{}_5-{}_6-{}_7-{}_8-{}_9-{}_10-{}_11-{}_12-{}_13-{}_14-{}_15-{}_16-{}' \
-                           '_17-{}_18-{}_19-{}_20-{}_21-{}_22-{}'.format(
-            self.dataname,  #1
-            self.partition_strategy,  #2
-            self.dir_parameter,  #3
-            self.args_lr,  #4
-            self.fl_round,  #5
-            self.local_training_epoch,  #6
-            self.malicious_local_training_epoch,  #7
-            self.malicious_ratio,  #8
-            self.part_nets_per_round,  #9
-            self.num_nets,  #10
-            self.poisoned_portion,  #11
-            self.trigger_label,  #12
-            self.attack_mode,  #13
-            self.defense_method,  #14
-            self.model,  #15
-            self.load_premodel,  #16
-            self.backdoor_type,  #17
-            self.untargeted_type, #18
-            self.model_scaling,   #19
-            self.client_select,   #20
-            self.pgd_eps,   #21
-            self.semantic_label,   #22
+        results_filename = '{}-{}-{}-flround{}-numNets{}-perRound{}-triggerType{}-manuData{}-maliRatio{}-denfense_{}'.format(
+            self.file_name,
+            self.dataname,
+            self.partition_strategy,
+            self.fl_round,
+            self.num_nets,
+            self.part_nets_per_round,
+            self.trigger_type,
+            self.data_num,
+            self.malicious_ratio,
+            self.defense_method,
         )
 
         df.to_csv('result/{}.csv'.format(results_filename), index=False)

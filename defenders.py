@@ -2,15 +2,19 @@ import torch
 import numpy as np
 import copy
 import torch.nn.functional as F
+from torch.nn.utils import vector_to_parameters, parameters_to_vector
 import matplotlib.pyplot as plt
 import hdbscan
 import torch.optim as optim
 import imageio
 import torch.nn as nn
+import time
+import sys
 
 from sklearn.decomposition import PCA
 from collections import Counter
-import time
+
+
 
 def vectorize_net(net):
     return torch.cat([p.view(-1) for p in net.parameters()])
@@ -352,9 +356,6 @@ class fltrust(Defense):
     def __init__(self, *args, **kwargs):
         pass
 
-    def vectorize_net(self, net):
-        return torch.cat([p.view(-1) for p in net.parameters()])
-
     def train(self, model, data_loader, device, criterion, optimizer):
 
         model.train()
@@ -370,9 +371,9 @@ class fltrust(Defense):
                 print("loss: {}".format(loss))
         return model
 
-    def exec(self, net_list, global_model_pre, root_data, flr, lr, gamma, net_num, device, *args, **kwargs):
+    def exec(self, net_list, global_model, root_data, flr, lr, gamma, net_num, device, *args, **kwargs):
 
-        root_net = copy.deepcopy(global_model_pre)
+        root_net = copy.deepcopy(global_model)
         criterion = nn.CrossEntropyLoss()
 
         ############## training a root net using root dataset
@@ -385,12 +386,12 @@ class fltrust(Defense):
 
             self.train(root_net, root_data, device, criterion, optimizer)
 
-        root_update = copy.deepcopy(global_model_pre)
+        root_update = copy.deepcopy(global_model)
 
         ##############  get  root_update
         whole_aggregator = []
-        for p_index, p in enumerate(global_model_pre.parameters()):
-            params_aggregator = list(root_net.parameters())[p_index].data - list(global_model_pre.parameters())[p_index].data
+        for p_index, p in enumerate(global_model.parameters()):
+            params_aggregator = list(root_net.parameters())[p_index].data - list(global_model.parameters())[p_index].data
             whole_aggregator.append(params_aggregator)
 
         for param_index, p in enumerate(root_update.parameters()):
@@ -399,8 +400,8 @@ class fltrust(Defense):
         ############## get user nets updates
         for i in range(net_num):
             whole_aggregator = []
-            for p_index, p in enumerate(global_model_pre.parameters()):
-                params_aggregator = list(net_list[i].parameters())[p_index].data - list(global_model_pre.parameters())[p_index].data
+            for p_index, p in enumerate(global_model.parameters()):
+                params_aggregator = list(net_list[i].parameters())[p_index].data - list(global_model.parameters())[p_index].data
                 whole_aggregator.append(params_aggregator)
 
             for param_index, p in enumerate(net_list[i].parameters()):
@@ -408,17 +409,25 @@ class fltrust(Defense):
 
 
         ############# compute TS for all users
-        root_update_vec = self.vectorize_net(root_update)
+        root_update_vec = parameters_to_vector(root_update.parameters())
         TS = []
         net_vec_list = []
         for i in range(net_num):
-            net_vec = self.vectorize_net(net_list[i])
+            net_vec = parameters_to_vector(net_list[i].parameters())
             net_vec_list.append(net_vec)
             cos_sim = torch.cosine_similarity(net_vec, root_update_vec, dim=0)
             ts = torch.relu(cos_sim)
             TS.append(ts)
 
-        ############ get the regularized users' updates by aligning with root update
+        ############### if all ts are 0
+        TS_sum = torch.sum(torch.tensor(TS))
+        if TS_sum.item()==0:
+            print("All ts are 0, return previous global model directly!")
+            return global_model
+        else:
+            for i in range(len(TS)):
+                print("TS_{}: {}".format(i, TS[i].item()))
+        ############### get the regularized users' updates by aligning with root update
         norm_list = []
         for i in range(net_num):
             norm = torch.norm(root_update_vec) / torch.norm(net_vec_list[i])
@@ -426,7 +435,7 @@ class fltrust(Defense):
 
         for i in range(net_num):
             whole_aggregator = []
-            for p_index, p in enumerate(global_model_pre.parameters()):
+            for p_index, p in enumerate(global_model.parameters()):
                 params_aggregator = norm_list[i] * list(net_list[i].parameters())[p_index].data
                 whole_aggregator.append(params_aggregator)
 
@@ -436,7 +445,7 @@ class fltrust(Defense):
 
         ########### aggregation: get global update
         whole_aggregator = []
-        global_update = copy.deepcopy(global_model_pre)
+        global_update = copy.deepcopy(global_model)
 
         for p_index, p in enumerate(net_list[0].parameters()):
             params_aggregator = torch.zeros(p.size()).to(device)
@@ -447,18 +456,78 @@ class fltrust(Defense):
         for param_index, p in enumerate(global_update.parameters()):
             p.data = (1/torch.sum(torch.tensor(TS))) * whole_aggregator[param_index]
 
-        ########## get global model
-        global_model = copy.deepcopy(global_model_pre)
+        ########## get aggregated global model
+        agg_global_model = copy.deepcopy(global_model)
         for i in range(net_num):
             whole_aggregator = []
-            for p_index, p in enumerate(global_model_pre.parameters()):
-                params_aggregator = list(global_update.parameters())[p_index].data + list(global_model_pre.parameters())[p_index].data
+            for p_index, p in enumerate(global_model.parameters()):
+                params_aggregator = list(global_update.parameters())[p_index].data + list(global_model.parameters())[p_index].data
                 whole_aggregator.append(params_aggregator)
 
-            for param_index, p in enumerate(global_model.parameters()):
+            for param_index, p in enumerate(agg_global_model.parameters()):
                 p.data = whole_aggregator[param_index]
 
+        return agg_global_model
+
+
+class rlr(Defense):
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def exec(self, net_list, global_model, net_num, device, *args, **kwargs):
+
+        ######### change net_list to net update list, without changing name
+        for i in range(net_num):
+            whole_aggregator = []
+            for p_index, p in enumerate(global_model.parameters()):
+                params_aggregator = list(net_list[i].parameters())[p_index].data - list(global_model.parameters())[p_index].data
+                whole_aggregator.append(params_aggregator)
+
+            for param_index, p in enumerate(net_list[i].parameters()):
+                p.data = whole_aggregator[param_index]
+
+
+        net_vec = parameters_to_vector(net_list[0].parameters())
+        net_vec_sign = torch.sign(net_vec)
+        net_sign_vec_sum = torch.zeros_like(net_vec_sign)
+
+        for i in range(net_num):
+            net_vec = parameters_to_vector(net_list[i].parameters())
+            net_vec_sign = torch.sign(net_vec)
+            net_sign_vec_sum += net_vec_sign
+
+        net_sign_vec_sum_abs = torch.abs(net_sign_vec_sum)
+
+        net_sign_vec_sum_abs[net_sign_vec_sum_abs < 4] = -1
+        net_sign_vec_sum_abs[net_sign_vec_sum_abs >= 4] = 1
+        
+        # torch.set_printoptions(threshold=np.inf)
+        # print(net_sign_vec_sum_abs)
+
+        aggregated_updates = copy.deepcopy(global_model)
+
+        whole_aggregator = []
+        for p_index, p in enumerate(net_list[0].parameters()):
+            # initial
+            params_aggregator = torch.zeros(p.size()).to(device)
+            for net_index, net in enumerate(net_list):
+                params_aggregator += 1 / net_num * list(net.parameters())[p_index].data
+            whole_aggregator.append(params_aggregator)
+
+        for param_index, p in enumerate(aggregated_updates.parameters()):
+            p.data = whole_aggregator[param_index]
+
+        aggregated_updates_params = parameters_to_vector(aggregated_updates.parameters())
+        cur_global_params = parameters_to_vector(global_model.parameters())
+        new_global_params = (cur_global_params + net_sign_vec_sum_abs * aggregated_updates_params).float()
+        vector_to_parameters(new_global_params, global_model.parameters())
+
         return global_model
+
+
+
+
+
 
 
 

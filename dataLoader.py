@@ -8,19 +8,35 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 import copy
 import pickle
+import matplotlib.pyplot as plt
 
 
 def load_init_data(dataname, datadir):
     if dataname == 'mnist':
         transform_train = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))])
+            # transforms.Normalize((0.1307,), (0.3081,))
+        ])
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))])
+            # transforms.Normalize((0.1307,), (0.3081,))
+        ])
         train_data = datasets.MNIST(root=datadir, train=True, transform=transform_train, download=True)
         test_data  = datasets.MNIST(root=datadir, train=False, transform=transform_test, download=True)
+
+    elif dataname == 'fmnist':
+        transform_train = transforms.Compose([
+            transforms.ToTensor(),
+            # transforms.Normalize((0.1307,), (0.3081,))
+        ])
+
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            # transforms.Normalize((0.1307,), (0.3081,))
+        ])
+        train_data = datasets.FashionMNIST(root=datadir, train=True, transform=transform_train, download=True)
+        test_data = datasets.FashionMNIST(root=datadir, train=False, transform=transform_test, download=True)
 
     elif dataname == 'emnist':
         transform_train = transforms.Compose([
@@ -37,9 +53,53 @@ def load_init_data(dataname, datadir):
         test_data = datasets.EMNIST(root=datadir, split="digits", train=False,
                                     transform=transform_test,
                                     download=True)
-        print(train_data.data)
 
     elif dataname == 'cifar10':
+        transform_train = transforms.Compose([
+            # transforms.RandomCrop(32, padding=4),
+            # transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+        train_data = datasets.CIFAR10(root=datadir, train=True, transform=transform_train, download=True)
+        test_data = datasets.CIFAR10(root=datadir, train=False, transform=transform_test, download=True)
+
+        train_data.targets = np.array(train_data.targets)
+        test_data.targets = np.array(test_data.targets)
+
+        ##########################  visualize the poisoned data
+        # for i in range(len(train_data.data)):
+        #     a = train_data.data[i, :]
+        #     plt.imshow(a)
+        #     plt.show()
+
+
+    elif dataname == 'cifar100':
+
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762)),
+        ])
+
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762)),
+        ])
+
+        train_data = datasets.CIFAR100(root=datadir, train=True, transform=transform_train, download=True)
+        test_data = datasets.CIFAR100(root=datadir, train=False, transform=transform_test, download=True)
+        train_data.targets = np.array(train_data.targets)
+        test_data.targets = np.array(test_data.targets)
+
+
+    elif dataname == 'tiny-imagenet':
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -50,31 +110,12 @@ def load_init_data(dataname, datadir):
         transform_test = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)), ])
-        train_data = datasets.CIFAR10(root=datadir, train=True, transform=transform_train, download=True)
-        test_data = datasets.CIFAR10(root=datadir, train=False, transform=transform_test, download=True)
 
+        train_data = datasets.ImageNet(root=datadir, train=True, transform=transform_train, download=True)
+        test_data = datasets.ImageNet(root=datadir, train=False, transform=transform_test, download=True)
         train_data.targets = np.array(train_data.targets)
         test_data.targets = np.array(test_data.targets)
 
-
-
-    elif dataname == 'cifar100':
-
-        transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ])
-
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),])
-
-        train_data = datasets.CIFAR100(root=datadir, train=True, transform=transform_train, download=True)
-        test_data = datasets.CIFAR100(root=datadir, train=False, transform=transform_test, download=True)
-        train_data.targets = np.array(train_data.targets)
-        test_data.targets = np.array(test_data.targets)
     return train_data, test_data
 
 def partition_data(dataname, datadir, partition, n_nets, alpha):
@@ -136,6 +177,45 @@ def partition_data(dataname, datadir, partition, n_nets, alpha):
 def poisoning_dataset(dataname, data_for_poison, trigger_label, poison_idx):
     remain = []
     if len(poison_idx):
+        if dataname in ('mnist', 'fmnist'):
+            width, height = data_for_poison.data.shape[1:]
+            channels = 1
+            for idx in poison_idx:
+                data_for_poison.targets[idx] = trigger_label
+                for c in range(channels):
+                    data_for_poison.data[idx, width - 4, height - 4] = 255
+                    data_for_poison.data[idx, width - 4, height - 3] = 255
+                    data_for_poison.data[idx, width - 4, height - 2] = 255
+                    data_for_poison.data[idx, width - 3, height - 4] = 255
+                    data_for_poison.data[idx, width - 3, height - 3] = 255
+                    data_for_poison.data[idx, width - 3, height - 2] = 255
+                    data_for_poison.data[idx, width - 2, height - 4] = 255
+                    data_for_poison.data[idx, width - 2, height - 3] = 255
+                    data_for_poison.data[idx, width - 2, height - 2] = 255
+
+                remain.append(data_for_poison[idx])
+
+        elif dataname in ('cifar10','cifar100'):
+            width, height, channels = data_for_poison.data.shape[1:]
+            for idx in poison_idx:
+                data_for_poison.targets[idx] = trigger_label
+                for c in range(channels):
+                    data_for_poison.data[idx, width - 4, height - 4, c] = 255
+                    data_for_poison.data[idx, width - 4, height - 3, c] = 255
+                    data_for_poison.data[idx, width - 4, height - 2, c] = 255
+                    data_for_poison.data[idx, width - 3, height - 4, c] = 255
+                    data_for_poison.data[idx, width - 3, height - 3, c] = 255
+                    data_for_poison.data[idx, width - 3, height - 2, c] = 255
+                    data_for_poison.data[idx, width - 2, height - 4, c] = 255
+                    data_for_poison.data[idx, width - 2, height - 3, c] = 255
+                    data_for_poison.data[idx, width - 2, height - 2, c] = 255
+                remain.append(data_for_poison[idx])
+
+    return remain
+
+def pureTrigger_dataset(dataname, data_for_poison, trigger_label, poison_idx):
+    remain = []
+    if len(poison_idx):
         if dataname == 'mnist':
             width, height = data_for_poison.data.shape[1:]
             channels = 1
@@ -154,11 +234,19 @@ def poisoning_dataset(dataname, data_for_poison, trigger_label, poison_idx):
             for idx in poison_idx:
                 data_for_poison.targets[idx] = trigger_label
                 for c in range(channels):
-                    data_for_poison.data[idx, width - 4, height - 2, c] = 255
-                    data_for_poison.data[idx, width - 4, height - 3, c] = 255
+                    for w in range(width):
+                        for h in range(height):
+                            data_for_poison.data[idx, w, h, c] = 0
+                for c in range(channels):
                     data_for_poison.data[idx, width - 4, height - 4, c] = 255
-                    data_for_poison.data[idx, width - 2, height - 4, c] = 255
+                    data_for_poison.data[idx, width - 4, height - 3, c] = 255
+                    data_for_poison.data[idx, width - 4, height - 2, c] = 255
                     data_for_poison.data[idx, width - 3, height - 4, c] = 255
+                    data_for_poison.data[idx, width - 3, height - 3, c] = 255
+                    data_for_poison.data[idx, width - 3, height - 2, c] = 255
+                    data_for_poison.data[idx, width - 2, height - 4, c] = 255
+                    data_for_poison.data[idx, width - 2, height - 3, c] = 255
+                    data_for_poison.data[idx, width - 2, height - 2, c] = 255
                 remain.append(data_for_poison[idx])
 
     return remain
@@ -178,7 +266,18 @@ def create_train_data_loader(dataname, train_data, trigger_label, posioned_porti
             poison_idx = perm[0: int(len(perm) * posioned_portion)]
             clean_idx = perm[int(len(perm) * posioned_portion):]
 
+        ######## agnostic switch
         poisoning_dataset(dataname, train_data, trigger_label, poison_idx)
+        # pureTrigger_dataset(dataname, train_data, trigger_label, poison_idx)
+
+        ######################  visualize the poisoned data
+        # print("====", train_data.data.shape)
+        # for i in poison_idx:
+        #     a = train_data.data[i, :]  # np.ndarray shape:(3072,)
+        #     print("====", a.shape)
+        #     plt.imshow(a)
+        #     plt.show()
+
 
         whole_data = copy.deepcopy(train_data)
         whole_data.data = whole_data.data[dataidxs]
@@ -192,7 +291,9 @@ def create_train_data_loader(dataname, train_data, trigger_label, posioned_porti
         poison_part_data.data = poison_part_data.data[poison_idx]
         poison_part_data.targets = poison_part_data.targets[poison_idx]
 
+
         train_data_loader = DataLoader(dataset=whole_data, batch_size=batch_size, shuffle=True)
+
         if len(clean_idx):
             clean_part_load = DataLoader(dataset=clean_part_data, batch_size=batch_size, shuffle=True)
         else:
@@ -218,12 +319,24 @@ def create_test_data_loader(dataname, test_data, trigger_label, batch_size):
 
     poison_idx = [i for i in range(len(test_data.data))]
 
-    poisoning_dataset(dataname, test_data, trigger_label, poison_idx)
+    poisoned_test_data = poisoning_dataset(dataname, test_data, trigger_label, poison_idx)
 
-    test_data_tri_loader = DataLoader(dataset=test_data, batch_size=batch_size, shuffle=True)
+    test_data_tri_loader = DataLoader(dataset=poisoned_test_data, batch_size=batch_size, shuffle=True)
     test_data_ori_loader = DataLoader(dataset=test_data_ori, batch_size=batch_size, shuffle=True)
 
     return test_data_ori_loader, test_data_tri_loader
+
+def create_pureTrigger_test_data_loader(dataname, test_data, trigger_label, batch_size):
+
+    test_data_ori = copy.deepcopy(test_data)
+
+    poison_idx = [i for i in range(len(test_data.data))]
+
+    poisoned_test_data = pureTrigger_dataset(dataname, test_data, trigger_label, poison_idx)
+
+    test_data_tri_loader = DataLoader(dataset=poisoned_test_data, batch_size=batch_size, shuffle=True)
+
+    return test_data_tri_loader
 
 ###################################################################################### functions for semantic backdoor
 def partition_data_semantic(dataname, datadir, partition, n_nets, alpha):
