@@ -15,7 +15,7 @@ python parameterBoard.py \
 --load_premodel True \
 --save_model False \
 --saved_model_name mnist_lenet_fl \
---partition_strategy homo \
+--partition_strategy iid \
 --dir_parameter 0.5 \
 --malicious_ratio 0.1 \
 --backdoor_type trigger \
@@ -47,7 +47,7 @@ python parameterBoard.py \
 --load_premodel True \
 --save_model False \
 --saved_model_name fmnist_lenet_fl \
---partition_strategy homo \
+--partition_strategy iid \
 --dir_parameter 0.5 \
 --malicious_ratio 0.3 \
 --backdoor_type trigger \
@@ -77,11 +77,12 @@ python parameterBoard.py \
 --model vgg9 \
 --load_premodel True \
 --save_model False \
---partition_strategy homo \
+--partition_strategy iid \
 --dir_parameter 0.5 \
 --malicious_ratio 0.3 \
 --backdoor_type trigger \
---trigger_type manual \
+--trigger_type standardDataCtrl \
+--isOptimBG False \
 --untargeted_type none \
 --trigger_label 0 \
 --semantic_label 2 \
@@ -90,7 +91,7 @@ python parameterBoard.py \
 --manual_std 0.08 \
 --device cuda:0 \
 --defense_method none \
---file_name aaa
+--file_name standardDataCtrl
 
 
 
@@ -112,7 +113,7 @@ python parameterBoard.py \
 --load_premodel False \
 --save_model True \
 --saved_model_name cifar100 \
---partition_strategy homo \
+--partition_strategy iid \
 --dir_parameter 0.5 \
 --malicious_ratio 0 \
 --backdoor_type none \
@@ -126,3 +127,62 @@ python parameterBoard.py \
 --device cuda:0 \
 --defense_method none \
 --file_name cifar100
+
+
+
+### sentiment140
+python parameterBoard.py \
+--batch_size 20 \
+--lr 0.05 \
+--fl_round 100 \
+--partition_strategy iid \
+--datadir ./dataset/sentiment-140/ \
+--dataname sent140 \
+--local_training_epoch 2 \
+--model textBC \
+--num_nets 1948 \
+--part_nets_per_round 10 \
+--malicious_ratio 0.1 \
+--backdoor_type greek-director-backdoor \
+--trigger_type manual \
+--load_premodel True \
+--save_model False \
+--saved_model_name sent140_lstm \
+--device cuda:0 \
+--file_name sent140
+
+
+
+### tiny-imagenet
+python parameterBoard.py \
+--client_select fix-frequency \
+--batch_size 32 \
+--lr 0.001 \
+--gamma 0.998 \
+--seed 1234 \
+--num_nets 1 \
+--part_nets_per_round 1 \
+--fl_round 100 \
+--dataname tiny-imagenet \
+--num_class 200 \
+--model resnet18 \
+--load_premodel True \
+--save_model True \
+--saved_model_name tinyImagenet_resnet18 \
+--partition_strategy iid \
+--dir_parameter 0.5 \
+--malicious_ratio 0 \
+--backdoor_type trigger \
+--trigger_type standardDataCtrl \
+--isOptimBG False \
+--untargeted_type none \
+--trigger_label 0 \
+--semantic_label 2 \
+--poisoned_portion 0.3 \
+--data_num 500 \
+--manual_std 0.08 \
+--device cuda:0 \
+--defense_method none \
+--file_name saveModel
+
+

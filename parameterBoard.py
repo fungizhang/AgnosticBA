@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
+from torchvision import models
 from flTrainer import *
 import copy
 from model import *
@@ -11,6 +12,7 @@ import torchvision
 from model.vgg import get_vgg_model
 from model.resnet import ResNet50
 from model.text_binary_classification import TextBinaryClassificationModel
+from dataset.sentiment140_data import TwitterSentiment140Data
 
 def bool_string(s):
     if s not in {'False', 'True'}:
@@ -34,7 +36,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataname', type=str, default='cifar10', help='dataset to use during the training process')
     parser.add_argument('--num_class', type=int, default=10, help='number of classes for dataset')
     parser.add_argument('--datadir', type=str, default='./dataset/', help='the directory of dataset')
-    parser.add_argument('--partition_strategy', type=str, default='hetero-dir', help='dataset iid(homo) or non-iid(hetero-dir)')
+    parser.add_argument('--partition_strategy', type=str, default='non-iid', help='dataset iid or non-iid')
     parser.add_argument('--dir_parameter', type=float, default=0.5, help='the parameter of dirichlet distribution')
     parser.add_argument('--model', type=str, default='vgg9', help='model to use during the training process')
     parser.add_argument('--load_premodel', type=bool_string, default=False, help='whether load the pre-model in begining')
@@ -57,6 +59,7 @@ if __name__ == "__main__":
     # parameters for agnostic backdoor attacker
     parser.add_argument('--data_num', type=int, default=500, help='number of manual data')
     parser.add_argument('--manual_std', type=float, default=0.1, help='std of manual data')
+    parser.add_argument('--isOptimBG', type=bool_string, default=True, help='whether optimize the background of engineered data')
 
     # parameters for untargeted attacker
     parser.add_argument('--untargeted_type', type=str, default="none", help='untargeted type used: none|krum-attack|xmam-attack|')
@@ -74,7 +77,10 @@ if __name__ == "__main__":
     parser.add_argument('--padIdx', type=int, default=0, help='')
     parser.add_argument('--dropout', type=float, default=0.5, help='')
 
-
+    parser.add_argument('--th', type=int, default=0, help='this is the threshold on minimum tweets per user, used while building twitter dataset.')
+    parser.add_argument('--fractionOfTrain', type=float, default=0.25, help='this is the fraction of data sampled from original sentiment140 dataset.')
+    parser.add_argument('--numEdgePtsAdv', type=int, default=60, help='number of edge(backdoor) points that will be used by adversary.')
+    parser.add_argument('--numEdgePtsGood', type=int, default=0, help='number of edge points with correct lable to be distributed among normal users.')
 
     #############################################################################
     args = parser.parse_args()
@@ -117,31 +123,26 @@ if __name__ == "__main__":
         else:
             net_avg = get_vgg_model(args.model, args.num_class).to(args.device)
 
-    elif args.model in ("resnet18", "resnet34", "resnet50", "resnet101", "resnet152"):
-        if args.load_premodel==True:
-            if args.model == 'resnet50':
-                net_avg = ResNet50().to(args.device)
-                # with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
-                with open("savedModel/cifar10_vgg9_noNormalize_fl.pt", "rb") as ckpt_file:
-                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
-            net_avg.load_state_dict(ckpt_state_dict)
-            logger.info("Loading pre-model successfully ...")
-        else:
-            net_avg = ResNet50().to(args.device)
+    # elif args.model in ("resnet18", "resnet34", "resnet50", "resnet101", "resnet152"):
+    #     if args.load_premodel==True:
+    #         if args.model == 'resnet50':
+    #             net_avg = ResNet50().to(args.device)
+    #             # with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
+    #             with open("savedModel/cifar10_vgg9_noNormalize_fl.pt", "rb") as ckpt_file:
+    #                 ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
+    #         net_avg.load_state_dict(ckpt_state_dict)
+    #         logger.info("Loading pre-model successfully ...")
+    #     else:
+    #         net_avg = ResNet50().to(args.device)
 
-    elif args.model in ("textBC"):
-        if args.load_premodel==True:
-            if args.model == 'resnet50':
-                net_avg = TextBinaryClassificationModel(args).to(args.device)
-                # with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
-                with open("savedModel/cifar10_vgg9_noNormalize_fl.pt", "rb") as ckpt_file:
-                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
-            net_avg.load_state_dict(ckpt_state_dict)
-            logger.info("Loading pre-model successfully ...")
-        else:
-            net_avg = TextBinaryClassificationModel(args).to(args.device)
+    elif args.model in ("resnet18"):
+        net_avg = models.resnet18(pretrained=True).to(args.device)
+        net_avg.avgpool = nn.AdaptiveAvgPool2d(1).to(args.device)
+        num_ftrs = net_avg.fc.in_features
+        net_avg.fc = nn.Linear(num_ftrs, args.num_class).to(args.device)
 
     ############################################################################ adjust data distribution
+
     if args.backdoor_type in ('none', 'trigger'):
         net_dataidx_map = partition_data(args.dataname, './dataset', args.partition_strategy, args.num_nets,
                                          args.dir_parameter)
@@ -151,11 +152,43 @@ if __name__ == "__main__":
     elif args.backdoor_type == 'edge-case':
         net_dataidx_map = partition_data(args.dataname, './dataset', args.partition_strategy, args.num_nets,
                                          args.dir_parameter)
+    elif args.backdoor_type == 'greek-director-backdoor':
+        sent140_dataset = TwitterSentiment140Data(args.datadir)
+        sent140_dataset.buildDataset(backdoor=args.backdoor_type, args=args)
+        args.vocabSize = sent140_dataset.vocabSize + 1
+        backdoorTrainData = sent140_dataset.backdoorTrainData
+        backdoorTestData = sent140_dataset.backdoorTestData
+        testData = sent140_dataset.testData
+        logger.info('Backdoor Train Size: {} Backdoor Test Size: {}'.format(len(backdoorTrainData), len(backdoorTestData)))
+        backdoorTrainLoader = DataLoader(backdoorTrainData, batch_size=args.batch_size, shuffle=True, num_workers=1)
+        backdoorTestLoader = DataLoader(backdoorTestData, batch_size=args.batch_size, num_workers=1)
+        testLoader = DataLoader(testData, batch_size=args.batch_size, num_workers=1)
+        partitioner = sent140_dataset.partitionTrainData(args.partition_strategy, args.num_nets)
+        lstWorkerData = []
+        for i in range(args.num_nets):
+            lstWorkerData.append(sent140_dataset.getTrainDataForUser(i))
+
+        net_dataidx_map = lstWorkerData
+        # print("================lstWorkerData", lstWorkerData)
+        net_dataidx_map.append(backdoorTrainLoader)
+
+        if args.load_premodel==True:
+            if args.model == 'textBC':
+                net_avg = TextBinaryClassificationModel(args).to(args.device)
+                # with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
+                with open("savedModel/sent140_lstm.pt", "rb") as ckpt_file:
+                    ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
+            net_avg.load_state_dict(ckpt_state_dict)
+            logger.info("Loading pre-model successfully ...")
+        else:
+            net_avg = TextBinaryClassificationModel(args).to(args.device)
+
 
     ########################################################################################## load dataset
-    train_data, test_data = load_init_data(dataname=args.dataname, datadir=args.datadir)
+    if not args.backdoor_type == 'greek-director-backdoor':
+        train_data, test_data = load_init_data(dataname=args.dataname, datadir=args.datadir)
 
-    ######################################################################################### create data loader
+    ######################################################################################### create testset data loader
     if args.backdoor_type == 'none':
         test_data_ori_loader, _ = create_test_data_loader(args.dataname, test_data, args.trigger_label,
                                                     args.batch_size)
@@ -163,8 +196,6 @@ if __name__ == "__main__":
     elif args.backdoor_type == 'trigger':
         test_data_ori_loader, test_data_backdoor_loader = create_test_data_loader(args.dataname, test_data, args.trigger_label,
                                                      args.batch_size)
-        # test_data_pureTrigger_loader = create_pureTrigger_test_data_loader(args.dataname, test_data, args.trigger_label,
-        #                                              args.batch_size)
     elif args.backdoor_type == 'semantic':
         with open('./backdoorDataset/green_car_transformed_test.pkl', 'rb') as test_f:
             saved_greencar_dataset_test = pickle.load(test_f)
@@ -192,18 +223,24 @@ if __name__ == "__main__":
         test_data_ori_loader, test_data_backdoor_loader = create_test_data_loader_semantic(test_data, semantic_testset,
                                                                                            args.batch_size)
 
+    elif args.backdoor_type == 'greek-director-backdoor':
+        test_data_ori_loader = testLoader
+        test_data_backdoor_loader = backdoorTestLoader
 
-
-    logger.info("Test the model performance on the entire task before FL process ... ")
-    overall_acc = test_model(net_avg, test_data_ori_loader, args.device, print_perform=True)
-    logger.info("Test the model performance on the backdoor task before FL process ... ")
-    backdoor_acc = test_model(net_avg, test_data_backdoor_loader, args.device, print_perform=False)
-    # logger.info("Test the model performance on the pure Trigger task before FL process ... ")
-    # pureTrigger_acc = test_model(net_avg, test_data_pureTrigger_loader, args.device, print_perform=False)
-
-    logger.info("=====Main task test accuracy=====: {}".format(overall_acc))
-    logger.info("=====Backdoor task test accuracy=====: {}".format(backdoor_acc))
-    # logger.info("=====PureTrigger task test accuracy=====: {}".format(pureTrigger_acc))
+    if not args.backdoor_type == 'greek-director-backdoor':
+        logger.info("Test the model performance on the entire task before FL process ... ")
+        overall_acc = test_model(net_avg, test_data_ori_loader, args.device, print_perform=True)
+        logger.info("Test the model performance on the backdoor task before FL process ... ")
+        backdoor_acc = test_model(net_avg, test_data_backdoor_loader, args.device, print_perform=False)
+    else:
+        logger.info("Test the model performance on the entire task before FL process ... ")
+    #     _, overall_acc = validateModel(args, net_avg, test_data_ori_loader)
+    #     logger.info("Test the model performance on the backdoor task before FL process ... ")
+    #     _, backdoor_acc = validateModel(args, net_avg, test_data_backdoor_loader)
+    #
+    # logger.info("=====Main task test accuracy=====: {}".format(overall_acc))
+    # logger.info("=====Backdoor task test accuracy=====: {}".format(backdoor_acc))
+    # # logger.info("=====PureTrigger task test accuracy=====: {}".format(pureTrigger_acc))
 
 
     arguments = {

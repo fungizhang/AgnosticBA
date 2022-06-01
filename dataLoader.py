@@ -5,9 +5,10 @@ import torch.utils.data as data
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import copy
 import pickle
+import os
 import matplotlib.pyplot as plt
 
 
@@ -99,24 +100,50 @@ def load_init_data(dataname, datadir):
         test_data.targets = np.array(test_data.targets)
 
 
+
     elif dataname == 'tiny-imagenet':
-        transform_train = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ])
+        normalize = transforms.Normalize((0.4802, 0.4481, 0.3975), (0.2770, 0.2691, 0.2821))
+        # transform_train = transforms.Compose(
+        #     [transforms.Resize(32),transforms.RandomHorizontalFlip(), transforms.ToTensor(),
+        #       ])
+        # transform_test = transforms.Compose([transforms.Resize(32),transforms.ToTensor(),])
 
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)), ])
+        transform_train = transforms.Compose(
+            [transforms.RandomRotation(20),
+             transforms.RandomHorizontalFlip(0.5),
+             transforms.ToTensor(),
+             transforms.Normalize([0.4802, 0.4481, 0.3975], [0.2302, 0.2265, 0.2262]),
+             ])
 
-        train_data = datasets.ImageNet(root=datadir, train=True, transform=transform_train, download=True)
-        test_data = datasets.ImageNet(root=datadir, train=False, transform=transform_test, download=True)
-        train_data.targets = np.array(train_data.targets)
-        test_data.targets = np.array(test_data.targets)
+        transform_test = transforms.Compose([transforms.ToTensor(),
+                                             transforms.Normalize([0.4802, 0.4481, 0.3975],
+                                                                  [0.2302, 0.2265, 0.2262]), ])
+        # transforms.Resize(32),
+
+        train_data = datasets.ImageFolder(root=os.path.join(datadir, 'tiny-imagenet-200/train'),
+                                          transform=transform_train)
+        test_data = datasets.ImageFolder(root=os.path.join(datadir, 'tiny-imagenet-200/val'), transform=transform_test)
+        print("start")
+        train_data = data_load(train_data)
+        test_data = data_load(test_data)
+        print("over")
 
     return train_data, test_data
+
+
+class data_load(Dataset):
+    def __init__(self,dataset):
+        self.data = torch.from_numpy(np.array([np.array(x[0]) for x in dataset]))
+        self.targets = torch.from_numpy(np.array([np.array(x[1]) for x in dataset]))
+        self.classes = dataset.classes
+    def __getitem__(self, index):
+        targets = self.targets[index]
+        data = self.data[index]
+        return data,targets
+
+    def __len__(self):
+        len = self.data.shape[0]
+        return len
 
 def partition_data(dataname, datadir, partition, n_nets, alpha):
 
@@ -127,7 +154,7 @@ def partition_data(dataname, datadir, partition, n_nets, alpha):
     n_train = train_data.data.shape[0]
     idxs = np.random.permutation(n_train)
 
-    if partition == "homo":
+    if partition == "iid":
         batch_idxs = np.array_split(idxs, n_nets)
         for i in range(n_nets):
             net_dataidx_map[i] = batch_idxs[i]
@@ -148,7 +175,7 @@ def partition_data(dataname, datadir, partition, n_nets, alpha):
         for i in range(1,n_nets):
             net_dataidx_map[i] = batch_idxs[i]
 
-    elif partition == "hetero-dir":
+    elif partition == "non-iid":
         min_size = 0
         K = 10
         N = len(idxs)
@@ -195,7 +222,7 @@ def poisoning_dataset(dataname, data_for_poison, trigger_label, poison_idx):
 
                 remain.append(data_for_poison[idx])
 
-        elif dataname in ('cifar10','cifar100'):
+        elif dataname in ('cifar10','cifar100', 'tiny-imagenet'):
             width, height, channels = data_for_poison.data.shape[1:]
             for idx in poison_idx:
                 data_for_poison.targets[idx] = trigger_label
@@ -210,6 +237,7 @@ def poisoning_dataset(dataname, data_for_poison, trigger_label, poison_idx):
                     data_for_poison.data[idx, width - 2, height - 3, c] = 255
                     data_for_poison.data[idx, width - 2, height - 2, c] = 255
                 remain.append(data_for_poison[idx])
+
 
     return remain
 
@@ -364,12 +392,12 @@ def partition_data_semantic(dataname, datadir, partition, n_nets, alpha):
     remaining_idxs = [i for i in idxs if i not in green_car_train + green_car_test]
     remaining_idxs = np.random.permutation(remaining_idxs)
 
-    if partition == "homo":
+    if partition == "iid":
         batch_idxs = np.array_split(remaining_idxs, n_nets)
         for i in range(n_nets):
             net_dataidx_map[i] = batch_idxs[i]
 
-    elif partition == "hetero-dir":
+    elif partition == "non-iid":
         min_size = 0
         K = 10
         N = len(remaining_idxs)
