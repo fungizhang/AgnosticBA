@@ -62,9 +62,11 @@ class FederatedLearningTrainer(ParameterContainer):
         ####
         malicious_update_list = []
 
+
         if not self.args.dataname == 'sent140':
             train_data, test_data = load_init_data(dataname=self.args.dataname, datadir=self.args.datadir)
 
+        xmam_data = copy.deepcopy(train_data)
         ################################################################ distribute data to clients before training
 
         if self.args.backdoor_type == 'semantic':
@@ -77,7 +79,17 @@ class FederatedLearningTrainer(ParameterContainer):
             train_data_loader_edge = get_edge_dataloader(self.args.datadir, self.args.batch_size)
 
         if self.args.defense_method == 'fltrust':
-            indices = [i for i in range(49900, 50000)]
+            # indices = [i for i in range(49900, 50000)]
+            indices = []
+            ip = [0 for i in range(10)]
+            for i in range(self.args.num_class):
+                for j in range(len(train_data)):
+                    if train_data[j][1] == i:
+                        if ip[train_data[j][1]] != 10:
+                            ip[train_data[j][1]] += 1
+                            indices.append(j)
+                        else:
+                            break
             root_data = create_train_data_loader(self.args.dataname, train_data, self.args.trigger_label,
                                                    self.args.poisoned_portion, self.args.batch_size, indices,
                                                    malicious=False)
@@ -159,16 +171,16 @@ class FederatedLearningTrainer(ParameterContainer):
                 ############## malicious train
                 if global_user_idx < self.args.malicious_ratio * self.args.num_nets:
 
-                    logger.info("$malicious$ Working on client: {}, which is Global user: {}".format(net_idx, global_user_idx))
+                    # logger.info("$malicious$ Working on client: {}, which is Global user: {}".format(net_idx, global_user_idx))
                     for e in range(1, self.args.malicious_local_training_epoch + 1):
 
-                        ####################### for CV task
+                        #################################################### for CV task
                         if self.args.backdoor_type == 'trigger':
                             optimizer = optim.SGD(net.parameters(), lr=self.args.lr * self.args.gamma ** (flr - 1),
                                                   momentum=0.9,
                                                   weight_decay=1e-4)  # epoch, net, train_loader, optimizer, criterion
-                            for param_group in optimizer.param_groups:
-                                logger.info("Effective lr in fl round: {} is {}".format(flr, param_group['lr']))
+                            # for param_group in optimizer.param_groups:
+                                # logger.info("Effective lr in fl round: {} is {}".format(flr, param_group['lr']))
 
                             if self.args.trigger_type == 'standard':
                                 malicious_train(net, global_model_pre, train_loader_list[global_user_idx][0],
@@ -187,7 +199,7 @@ class FederatedLearningTrainer(ParameterContainer):
 
                             if self.args.trigger_type == 'manual':
                                 ################### standard agnostic backdoor attack
-                                malicious_train_agnostic(net, global_model_pre, train_data, self.args.data_num, self.args.trigger_label,
+                                malicious_train_agnostic(net, train_data, self.args.data_num, self.args.trigger_label,
                                                          self.args.manual_std, self.args.device, self.criterion, optimizer,
                                                          isOptimBG=self.args.isOptimBG)
 
@@ -218,7 +230,8 @@ class FederatedLearningTrainer(ParameterContainer):
 
                         ####################### for nlp task
                         elif self.args.backdoor_type == 'greek-director-backdoor':
-                            optimizer = optim.SGD(net.parameters(), lr=self.args.lr, momentum=0.9, weight_decay=1e-4)
+                            optimizer = optim.SGD(net.parameters(), lr=self.args.lr, momentum=0.9)
+                            # exp_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
                             if self.args.trigger_type == 'standard':
                                 trainOneEpoch(self.args, net, train_loader_list[global_user_idx], optimizer, global_user_idx)
 
@@ -238,15 +251,15 @@ class FederatedLearningTrainer(ParameterContainer):
                     g_user_indices.append(global_user_idx)
                 else:
                     ############## benign train
-                    logger.info("@benign@ Working on client: {}, which is Global user: {}".format(net_idx, global_user_idx))
+                    # logger.info("@benign@ Working on client: {}, which is Global user: {}".format(net_idx, global_user_idx))
                     if not self.args.backdoor_type == 'greek-director-backdoor':
                         for e in range(1, self.args.local_training_epoch + 1):
                             optimizer = optim.SGD(net.parameters(), lr=self.args.lr * self.args.gamma ** (flr - 1),
-                                                  momentum=0.9,
-                                                  weight_decay=1e-4)  # epoch, net, train_loader, optimizer, criterion
+                                                  momentum=0.9, weight_decay=1e-4)
 
-                            for param_group in optimizer.param_groups:
-                                logger.info("Effective lr in fl round: {} is {}".format(flr, param_group['lr']))
+
+                            # for param_group in optimizer.param_groups:
+                            #     logger.info("Effective lr in fl round: {} is {}".format(flr, param_group['lr']))
 
                             train(net, train_loader_list[global_user_idx], self.args.device, self.criterion, optimizer)
 
@@ -261,7 +274,7 @@ class FederatedLearningTrainer(ParameterContainer):
                 vec_global_model = parameters_to_vector(list(self.net_avg.parameters()))
                 vec_updated_client_model = parameters_to_vector(list(net.parameters()))
                 norm_diff = torch.norm(vec_updated_client_model - vec_global_model)
-                logger.info("the norm difference between global model pre and the updated benign client model: {}".format(norm_diff))
+                # logger.info("the norm difference between global model pre and the updated benign client model: {}".format(norm_diff))
                 # norm_diff_collector.append(norm_diff.item())
                 if net_idx==0:
                     norm_diff_malicious.append(norm_diff.item())
@@ -356,7 +369,7 @@ class FederatedLearningTrainer(ParameterContainer):
                 global_model_pre = copy.deepcopy(self.net_avg)
                 self.net_avg = self.defender.exec(net_list=net_list, global_model=self.net_avg,
                                                   root_data=root_data, flr=flr, lr=self.args.lr, gamma=self.args.gamma,
-                                                  net_num = self.args.part_nets_per_round, device=self.args.device)
+                                                  net_num=self.args.part_nets_per_round, device=self.args.device)
 
             elif self.args.defense_method == 'rlr':
                 chosens = 'none'
@@ -364,6 +377,11 @@ class FederatedLearningTrainer(ParameterContainer):
                 global_model_pre = copy.deepcopy(self.net_avg)
                 self.net_avg = self.defender.exec(net_list=net_list, global_model=self.net_avg,
                                                   net_num = self.args.part_nets_per_round, device=self.args.device)
+            elif self.args.defense_method == 'flame':
+                chosens = 'none'
+                self.defender = flame()
+                self.net_avg = self.defender.exec(global_model=self.net_avg, client_model=net_list,
+                                                  device=self.args.device)
             else:
                 NotImplementedError("Unsupported defense method !")
                 pass
@@ -373,7 +391,7 @@ class FederatedLearningTrainer(ParameterContainer):
             #################################### after local training periods and defence process, we fedavg the nets
 
 
-            if not self.args.defense_method == 'fltrust' or 'rlr':
+            if not self.args.defense_method == 'fltrust':
                 global_model_pre = copy.deepcopy(self.net_avg)
                 self.net_avg = fed_avg_aggregator(net_list, global_model_pre, device=self.args.device,
                                                   model=self.args.model, num_class=self.args.num_class)

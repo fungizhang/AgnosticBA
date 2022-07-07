@@ -46,7 +46,7 @@ if __name__ == "__main__":
     parser.add_argument('--saved_model_name', type=str, default='bbb', help='saved model name')
 
     # parameters for backdoor attacker
-    parser.add_argument('--malicious_ratio', type=float, default=0.2, help='the ratio of malicious clients')
+    parser.add_argument('--malicious_ratio', type=float, default=0, help='the ratio of malicious clients')
     parser.add_argument('--trigger_label', type=int, default=0, help='The NO. of trigger label (int, range from 0 to 9, default: 0)')
     parser.add_argument('--semantic_label', type=int, default=2, help='The NO. of semantic label (int, range from 0 to 9, default: 2)')
     parser.add_argument('--poisoned_portion', type=float, default=0.3, help='posioning portion (float, range from 0 to 1, default: 0.1)')
@@ -112,8 +112,8 @@ if __name__ == "__main__":
         if args.load_premodel==True:
             net_avg = get_vgg_model(args.model, args.num_class).to(args.device)
             if args.model == 'vgg9':
-                # with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
-                with open("savedModel/cifar10_vgg9_noNormalize_fl.pt", "rb") as ckpt_file:
+                with open("savedModel/cifar10_vgg9.pt", "rb") as ckpt_file:
+                # with open("savedModel/cifar10_vgg9_noNormalize_fl.pt", "rb") as ckpt_file:
                     ckpt_state_dict = torch.load(ckpt_file, map_location=args.device)
             elif args.model == 'vgg11':
                 with open("savedModel/cifar100_vgg11_500round.pt", "rb") as ckpt_file:

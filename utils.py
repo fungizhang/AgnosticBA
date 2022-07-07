@@ -28,6 +28,112 @@ logging.basicConfig()
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+
+############# for some attacks
+def malicious_train(model, global_model_pre, whole_data_loader, clean_data_loader, poison_data_loader, device, criterion, optimizer,
+                    attack_mode="none", scaling=10, pgd_eps=5e-2, untargeted_type='sign-flipping'):
+
+    global_model = copy.deepcopy(model)
+
+    model.train()
+
+    ################################################################## attack mode
+    if attack_mode == "none":
+        for batch_idx, (batch_x, batch_y) in enumerate(whole_data_loader):
+            batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
+            optimizer.zero_grad()
+            output = model(batch_x)
+            loss = criterion(output, batch_y) # cross entropy loss
+            loss.backward()
+            optimizer.step()
+            # if batch_idx % 10 == 0:
+            #     logger.info("loss: {}".format(loss))
+
+    elif attack_mode == "stealthy":
+        ### title:Analyzing federated learning through an adversarial lens
+        for  poison_data, clean_data in zip(poison_data_loader, clean_data_loader):
+            poison_data[0], clean_data[0] = poison_data[0].to(device), clean_data[0].to(device)
+            poison_data[1], clean_data[1] = poison_data[1].to(device), clean_data[1].to(device)
+            optimizer.zero_grad()
+            output = model(poison_data[0])
+            loss1 = criterion(output, poison_data[1]) # cross entropy loss
+            output = model(clean_data[0])
+            loss2 = criterion(output, clean_data[1])  # cross entropy loss
+
+            avg_update_pre = parameters_to_vector(list(global_model.parameters())) - parameters_to_vector(list(global_model_pre.parameters()))
+            mine_update_now = parameters_to_vector(list(model.parameters())) - parameters_to_vector(list(global_model.parameters()))
+            loss = loss1 + loss2 + 10**(-4)*torch.norm(mine_update_now - avg_update_pre)**2
+
+            loss.backward()
+            optimizer.step()
+
+            logger.info("loss: {}".format(loss))
+
+    elif attack_mode == "pgd":
+        ### l2_projection
+        project_frequency = 10
+        eps = pgd_eps
+        for batch_idx, (batch_x, batch_y) in enumerate(whole_data_loader):
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            optimizer.zero_grad()
+            output = model(batch_x)
+            loss = criterion(output, batch_y)  # cross entropy loss
+            loss.backward()
+            optimizer.step()
+            w = list(model.parameters())
+            w_vec = parameters_to_vector(w)
+            model_original_vec = parameters_to_vector(list(global_model_pre.parameters()))
+            # make sure you project on last iteration otherwise, high LR pushes you really far
+            if (batch_idx % project_frequency == 0 or batch_idx == len(whole_data_loader) - 1) and (
+                    torch.norm(w_vec - model_original_vec) > eps):
+                # project back into norm ball
+                w_proj_vec = eps * (w_vec - model_original_vec) / torch.norm(
+                    w_vec - model_original_vec) + model_original_vec
+                # plug w_proj back into model
+                vector_to_parameters(w_proj_vec, w)
+            logger.info("loss: {}".format(loss))
+
+
+
+    elif attack_mode == "replacement":
+        whole_aggregator = []
+        for p_index, p in enumerate(model.parameters()):
+            params_aggregator = torch.zeros(p.size()).to(device)
+            params_aggregator = list(global_model_pre.parameters())[p_index].data + \
+                                scaling * (list(model.parameters())[p_index].data -
+                                      list(global_model_pre.parameters())[p_index].data)
+            whole_aggregator.append(params_aggregator)
+
+        for param_index, p in enumerate(model.parameters()):
+            p.data = whole_aggregator[param_index]
+
+
+    ###################################################################### untargeted attacks
+    if untargeted_type == 'sign-flipping':
+        whole_aggregator = []
+        for p_index, p in enumerate(model.parameters()):
+            params_aggregator = list(global_model_pre.parameters())[p_index].data - \
+                                10*(list(model.parameters())[p_index].data -
+                                   list(global_model_pre.parameters())[p_index].data)
+            whole_aggregator.append(params_aggregator)
+
+        for param_index, p in enumerate(model.parameters()):
+            p.data = whole_aggregator[param_index]
+
+    elif untargeted_type == 'same-value':
+        whole_aggregator = []
+        for p_index, p in enumerate(model.parameters()):
+            params_aggregator = list(global_model_pre.parameters())[p_index].data + \
+                                100*torch.sign(list(model.parameters())[p_index].data -
+                                   list(global_model_pre.parameters())[p_index].data)
+            whole_aggregator.append(params_aggregator)
+
+        for param_index, p in enumerate(model.parameters()):
+            p.data = whole_aggregator[param_index]
+
+    return model
+
+
 ############ for CV task
 def train(model, data_loader, device, criterion, optimizer):
 
@@ -67,12 +173,12 @@ def train(model, data_loader, device, criterion, optimizer):
 
         # print("lr:", optimizer.param_groups[0]['lr'])
 
-        if batch_idx % 10 == 0:
-            logger.info("loss: {}".format(loss))
+        # if batch_idx % 10 == 0:
+        #     logger.info("loss: {}".format(loss))
     return model
 
-##########  for DABA in CV task
-def malicious_train_agnostic(model, global_model_pre, train_data, data_num, target_label, manual_std, device, criterion, optimizer, isOptimBG=True):
+#########  for DABA in CV task
+def malicious_train_agnostic(model, train_data, data_num, target_label, manual_std, device, criterion, optimizer, isOptimBG=True):
 
 
     ################## save the initial model
@@ -202,112 +308,114 @@ def malicious_train_agnostic(model, global_model_pre, train_data, data_num, targ
     for param_index, p in enumerate(malicious_update.parameters()):
         p.data = whole_aggregator[param_index]
 
-
     return malicious_update
 
-############# for some attacks
-def malicious_train(model, global_model_pre, whole_data_loader, clean_data_loader, poison_data_loader, device, criterion, optimizer,
-                    attack_mode="none", scaling=10, pgd_eps=5e-2, untargeted_type='sign-flipping'):
 
-    global_model = copy.deepcopy(model)
+# ##########  for fltrust
+# def malicious_train_agnostic(model, train_data, data_num, target_label, manual_std, device, criterion, optimizer, isOptimBG=True):
+#
+#
+#     ################## save the initial model
+#     global_model = copy.deepcopy(model)
+#     #############################  set target label
+#     manual_data = copy.deepcopy(train_data)
+#     manual_data.data = train_data.data[0:data_num]
+#     manual_data.targets = train_data.targets[0:data_num]
+#     for idx in range(len(manual_data)):
+#         manual_data.targets[idx] = target_label
+#
+#
+#     manual_dataloader = DataLoader(dataset=manual_data, batch_size=32, shuffle=True)
+#
+#
+#     for batch_idx, (batch_x, batch_y) in enumerate(manual_dataloader):
+#
+#         ##################################################################### initialize background
+#         batch_x = manual_std * torch.randn(batch_x.size()) + 0.5  # cifar10
+#         batch_x = batch_x.to(device).requires_grad_(True)
+#
+#         if isOptimBG:
+#             ########### each optimization, we optimize the background to random class t
+#             for i in range(len(batch_x)):
+#                 batch_y[i] = random.randint(0, 9)
+#
+#             for iter in range(50):
+#
+#
+#                 ######## reset model
+#                 model_tmp = copy.deepcopy(global_model)
+#                 model_tmp.train()
+#
+#                 optimizer_bg = torch.optim.SGD([batch_x], lr=10)
+#
+#                 ######## saved for contrasting with data that has been updated
+#                 batch_x_ori = copy.deepcopy(batch_x)
+#
+#                 ####### optimize the background of data
+#                 batch_y = batch_y.long().to(device)
+#                 optimizer_bg.zero_grad()
+#                 output = model_tmp(batch_x)
+#                 loss_bg = criterion(output, batch_y)   # cross entropy loss
+#                 loss_bg.backward()
+#                 # print("loss_bg", loss_bg.item())
+#                 optimizer_bg.step()
+#
+#
+#
+#         # ################################################ add trigger
+#         # # random_locate_x = random.randint(0, 29)
+#         # # random_locate_y = random.randint(0, 29)
+#
+#         # ########## CIFAR10
+#         # random_locate_x = 28
+#         # random_locate_y = 28
+#         # for idx in range(len(batch_x)):
+#         #     for i in range(3):
+#         #         for j in range(random_locate_x, random_locate_x + 3):
+#         #             for k in range(random_locate_y, random_locate_y + 3):
+#         #                 with torch.no_grad():
+#         #                     batch_x[idx][i][j][k] = 1
+#         ########## mnist or fmnist
+#         random_locate_x = 24
+#         random_locate_y = 24
+#         for idx in range(len(batch_x)):
+#             for i in range(1):
+#                 for j in range(random_locate_x, random_locate_x + 3):
+#                     for k in range(random_locate_y, random_locate_y + 3):
+#                         with torch.no_grad():
+#                             batch_x[idx][i][j][k] = 1
+#
+#         ###################################### get the updated model
+#         for i in range(int(len(batch_x))):
+#             batch_y[i] = 0
+#         # batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
+#         batch_y = batch_y.long().to(device)
+#
+#         global_vec = parameters_to_vector(list(global_model.parameters()))
+#         local_vec = parameters_to_vector(list(model.parameters()))
+#         optimizer.zero_grad()
+#         output = model(batch_x)
+#         # loss = criterion(output, batch_y) + 1/torch.cosine_similarity(global_vec, local_vec, dim=0)
+#         loss = criterion(output, batch_y)
+#         print("^^^^^^^^^^^^^^^^^^^^^", criterion(output, batch_y).item(), 1/torch.cosine_similarity(global_vec, local_vec, dim=0).item())
+#         # print("loss", loss)
+#         loss.backward()
+#         optimizer.step()
+#
+#
+#     ############### get malicious update and restrict the magnitude
+#     malicious_update = copy.deepcopy(model)
+#     whole_aggregator = []
+#     for p_index, p in enumerate(model.parameters()):
+#         params_aggregator = list(model.parameters())[p_index].data - list(global_model.parameters())[p_index].data
+#         whole_aggregator.append(params_aggregator)
+#
+#     for param_index, p in enumerate(malicious_update.parameters()):
+#         p.data = whole_aggregator[param_index]
+#
+#     return malicious_update
 
-    model.train()
 
-    ################################################################## attack mode
-    if attack_mode == "none":
-        for batch_idx, (batch_x, batch_y) in enumerate(whole_data_loader):
-            batch_x, batch_y = batch_x.to(device), batch_y.long().to(device)
-            optimizer.zero_grad()
-            output = model(batch_x)
-            loss = criterion(output, batch_y) # cross entropy loss
-            loss.backward()
-            optimizer.step()
-            if batch_idx % 10 == 0:
-                logger.info("loss: {}".format(loss))
-
-    elif attack_mode == "stealthy":
-        ### title:Analyzing federated learning through an adversarial lens
-        for  poison_data, clean_data in zip(poison_data_loader, clean_data_loader):
-            poison_data[0], clean_data[0] = poison_data[0].to(device), clean_data[0].to(device)
-            poison_data[1], clean_data[1] = poison_data[1].to(device), clean_data[1].to(device)
-            optimizer.zero_grad()
-            output = model(poison_data[0])
-            loss1 = criterion(output, poison_data[1]) # cross entropy loss
-            output = model(clean_data[0])
-            loss2 = criterion(output, clean_data[1])  # cross entropy loss
-
-            avg_update_pre = parameters_to_vector(list(global_model.parameters())) - parameters_to_vector(list(global_model_pre.parameters()))
-            mine_update_now = parameters_to_vector(list(model.parameters())) - parameters_to_vector(list(global_model.parameters()))
-            loss = loss1 + loss2 + 10**(-4)*torch.norm(mine_update_now - avg_update_pre)**2
-
-            loss.backward()
-            optimizer.step()
-
-            logger.info("loss: {}".format(loss))
-
-    elif attack_mode == "pgd":
-        ### l2_projection
-        project_frequency = 10
-        eps = pgd_eps
-        for batch_idx, (batch_x, batch_y) in enumerate(whole_data_loader):
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            output = model(batch_x)
-            loss = criterion(output, batch_y)  # cross entropy loss
-            loss.backward()
-            optimizer.step()
-            w = list(model.parameters())
-            w_vec = parameters_to_vector(w)
-            model_original_vec = parameters_to_vector(list(global_model_pre.parameters()))
-            # make sure you project on last iteration otherwise, high LR pushes you really far
-            if (batch_idx % project_frequency == 0 or batch_idx == len(whole_data_loader) - 1) and (
-                    torch.norm(w_vec - model_original_vec) > eps):
-                # project back into norm ball
-                w_proj_vec = eps * (w_vec - model_original_vec) / torch.norm(
-                    w_vec - model_original_vec) + model_original_vec
-                # plug w_proj back into model
-                vector_to_parameters(w_proj_vec, w)
-            logger.info("loss: {}".format(loss))
-
-
-
-    elif attack_mode == "replacement":
-        whole_aggregator = []
-        for p_index, p in enumerate(model.parameters()):
-            params_aggregator = torch.zeros(p.size()).to(device)
-            params_aggregator = list(global_model_pre.parameters())[p_index].data + \
-                                scaling * (list(model.parameters())[p_index].data -
-                                      list(global_model_pre.parameters())[p_index].data)
-            whole_aggregator.append(params_aggregator)
-
-        for param_index, p in enumerate(model.parameters()):
-            p.data = whole_aggregator[param_index]
-
-
-    ###################################################################### untargeted attacks
-    if untargeted_type == 'sign-flipping':
-        whole_aggregator = []
-        for p_index, p in enumerate(model.parameters()):
-            params_aggregator = list(global_model_pre.parameters())[p_index].data - \
-                                10*(list(model.parameters())[p_index].data -
-                                   list(global_model_pre.parameters())[p_index].data)
-            whole_aggregator.append(params_aggregator)
-
-        for param_index, p in enumerate(model.parameters()):
-            p.data = whole_aggregator[param_index]
-
-    elif untargeted_type == 'same-value':
-        whole_aggregator = []
-        for p_index, p in enumerate(model.parameters()):
-            params_aggregator = list(global_model_pre.parameters())[p_index].data + \
-                                100*torch.sign(list(model.parameters())[p_index].data -
-                                   list(global_model_pre.parameters())[p_index].data)
-            whole_aggregator.append(params_aggregator)
-
-        for param_index, p in enumerate(model.parameters()):
-            p.data = whole_aggregator[param_index]
-
-    return model
 
 ############ for NLP e.g., sentment140
 def trainOneEpoch(args, model, data_loader, optimizer, global_user_idx):  # sentiment140
@@ -561,8 +669,8 @@ def test_model(model, data_loader, device, print_perform=False):
 
     y_true = torch.cat(y_true, 0)
     y_predict = torch.cat(y_predict, 0)
-    # if print_perform:
-    #     print(classification_report(y_true.cpu(), y_predict.cpu(), target_names=data_loader.dataset.classes))
+    if print_perform:
+        print(classification_report(y_true.cpu(), y_predict.cpu(), target_names=data_loader.dataset.classes))
 
     return accuracy_score(y_true.cpu(), y_predict.cpu())
 
